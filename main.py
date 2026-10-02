@@ -1,11 +1,7 @@
-# MediaYuklaBot v3
-# YouTube + Instagram downloader
-# YouTube search + MP3 + Railway YOUTUBE_COOKIES support
-
 import asyncio
+import logging
 import os
 import re
-import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -27,111 +23,163 @@ from yt_dlp import YoutubeDL
 
 
 # =========================================================
-# SOZLAMALAR
+# CONFIG
 # =========================================================
 
 load_dotenv()
 
-TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 MAX_MB = int(os.getenv("MAX_FILE_MB", "49"))
-
-# Railway Variables ichidagi YOUTUBE_COOKIES
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "")
 
-# Railway/Linux uchun vaqtinchalik cookie fayl
+DOWNLOAD_DIR = Path("downloads")
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 COOKIE_FILE = Path("/tmp/youtube_cookies.txt")
-
-if YOUTUBE_COOKIES:
-    try:
-        COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-        # Ba'zan variable ichida \n matn ko'rinishida kelishi mumkin
-        cookie_text = YOUTUBE_COOKIES.replace("\\n", "\n")
-
-        COOKIE_FILE.write_text(
-            cookie_text,
-            encoding="utf-8"
-        )
-
-        print("✅ YouTube cookies yuklandi.")
-
-    except Exception as e:
-        print(f"⚠️ Cookie fayl yaratilmadi: {e}")
-else:
-    print("⚠️ YOUTUBE_COOKIES topilmadi.")
-
-
-# =========================================================
-# DOWNLOAD PAPKA
-# =========================================================
-
-D = Path("downloads")
-D.mkdir(exist_ok=True)
-
-
-# =========================================================
-# BOT
-# =========================================================
-
-r = Router()
-
-jobs = {}
-busy = set()
-
-URL = re.compile(r"https?://\S+", re.I)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-
-# =========================================================
-# COOKIE OPTIONS
-# =========================================================
-
-def cookie_options():
-
-    if YOUTUBE_COOKIES and COOKIE_FILE.exists():
-        return {
-            "cookiefile": str(COOKIE_FILE)
-        }
-
-    return {}
+logger = logging.getLogger("MediaYuklaBot")
 
 
 # =========================================================
-# FORMAT TUGMALARI
+# COOKIE
 # =========================================================
 
-def keyboard(j):
+def prepare_cookie():
+
+    if not YOUTUBE_COOKIES:
+        logger.warning("YOUTUBE_COOKIES mavjud emas.")
+        return False
+
+    try:
+        text = YOUTUBE_COOKIES.replace("\\n", "\n")
+
+        COOKIE_FILE.write_text(
+            text,
+            encoding="utf-8"
+        )
+
+        logger.info(
+            "YouTube cookie tayyorlandi."
+        )
+
+        return True
+
+    except Exception as e:
+
+        logger.error(
+            "Cookie yaratishda xato: %s",
+            e
+        )
+
+        return False
+
+
+prepare_cookie()
+
+
+# =========================================================
+# GLOBAL
+# =========================================================
+
+router = Router()
+
+jobs = {}
+
+busy = set()
+
+URL_PATTERN = re.compile(
+    r"https?://\S+",
+    re.I
+)
+
+
+# =========================================================
+# YT-DLP BASE OPTIONS
+# =========================================================
+
+def ydl_options():
+
+    opts = {
+
+        "quiet": True,
+
+        "no_warnings": True,
+
+        "noplaylist": True,
+
+        "retries": 5,
+
+        "fragment_retries": 5,
+
+        "extractor_retries": 3,
+
+        "socket_timeout": 30,
+
+        # Hozirgi YouTube reload muammosi uchun
+        "extractor_args": {
+            "youtube": {
+                "player_client": [
+                    "default",
+                    "web_embedded"
+                ]
+            }
+        },
+    }
+
+    if (
+        YOUTUBE_COOKIES
+        and COOKIE_FILE.exists()
+    ):
+
+        opts["cookiefile"] = str(
+            COOKIE_FILE
+        )
+
+    return opts
+
+
+# =========================================================
+# KEYBOARD
+# =========================================================
+
+def quality_keyboard(job_id):
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
+
             [
                 InlineKeyboardButton(
                     text="📱 360p",
-                    callback_data=f"d:{j}:360"
+                    callback_data=f"d:{job_id}:360"
                 ),
+
                 InlineKeyboardButton(
                     text="📺 480p",
-                    callback_data=f"d:{j}:480"
+                    callback_data=f"d:{job_id}:480"
                 ),
             ],
+
             [
                 InlineKeyboardButton(
                     text="🔥 720p",
-                    callback_data=f"d:{j}:720"
+                    callback_data=f"d:{job_id}:720"
                 ),
+
                 InlineKeyboardButton(
                     text="💎 1080p",
-                    callback_data=f"d:{j}:1080"
+                    callback_data=f"d:{job_id}:1080"
                 ),
             ],
+
             [
                 InlineKeyboardButton(
                     text="🎵 MP3",
-                    callback_data=f"d:{j}:mp3"
+                    callback_data=f"d:{job_id}:mp3"
                 )
             ]
         ]
@@ -139,168 +187,131 @@ def keyboard(j):
 
 
 # =========================================================
-# VIDEO MA'LUMOTINI OLISH
+# VIDEO INFO
 # =========================================================
 
-def info(url):
+def get_info(url):
 
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
+    opts = ydl_options()
 
-        **cookie_options(),
-    }
+    opts.update({
+        "skip_download": True
+    })
 
-    with YoutubeDL(options) as y:
+    with YoutubeDL(opts) as ydl:
 
-        x = y.extract_info(
+        data = ydl.extract_info(
             url,
             download=False
         )
 
-        title = x.get(
+    return {
+        "title": data.get(
             "title",
             "Video"
-        )
+        ),
 
-        duration = x.get(
+        "duration": data.get(
             "duration"
-        )
-
-        return title, duration
+        ),
+    }
 
 
 # =========================================================
 # YOUTUBE SEARCH
 # =========================================================
 
-def search(q):
+def search_youtube(query):
 
-    options = {
-        "quiet": True,
-        "no_warnings": True,
+    opts = ydl_options()
+
+    opts.update({
+
         "skip_download": True,
+
         "extract_flat": True,
+    })
 
-        **cookie_options(),
-    }
+    with YoutubeDL(opts) as ydl:
 
-    with YoutubeDL(options) as y:
-
-        x = y.extract_info(
-            "ytsearch5:" + q,
+        data = ydl.extract_info(
+            f"ytsearch5:{query}",
             download=False
         )
 
     results = []
 
-    for e in x.get("entries", []):
+    for item in (
+        data.get("entries") or []
+    )[:5]:
 
-        if not e:
+        if not item:
             continue
 
-        video_id = e.get("id")
+        video_id = item.get("id")
 
         if not video_id:
             continue
 
-        title = e.get(
-            "title",
-            "Natija"
-        )
+        results.append({
 
-        url = (
-            "https://www.youtube.com/watch?v="
-            + video_id
-        )
+            "title": item.get(
+                "title",
+                "Natija"
+            ),
 
-        results.append(
-            (title, url)
-        )
+            "url":
+                "https://www.youtube.com/watch?v="
+                + video_id
+        })
 
     return results
 
 
 # =========================================================
-# DOWNLOAD
+# DOWNLOAD VIDEO
 # =========================================================
 
-def dl(url, folder, mode):
+def download_video(
+    url,
+    folder,
+    height
+):
 
-    # -------------------------
-    # MP3
-    # -------------------------
+    opts = ydl_options()
 
-    if mode == "mp3":
+    opts.update({
 
-        options = {
-
-            "outtmpl": str(
-                folder / "audio.%(ext)s"
+        "outtmpl":
+            str(
+                folder /
+                "video.%(ext)s"
             ),
 
-            "format": "bestaudio/best",
+        "format":
+            f"bv*[height<={height}]+ba/"
+            f"b[height<={height}]/best",
 
-            "quiet": True,
+        "merge_output_format":
+            "mp4",
 
-            "no_warnings": True,
+    })
 
-            "noplaylist": True,
+    with YoutubeDL(opts) as ydl:
 
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }
-            ],
-
-            **cookie_options(),
-        }
-
-    # -------------------------
-    # VIDEO
-    # -------------------------
-
-    else:
-
-        options = {
-
-            "outtmpl": str(
-                folder / "video.%(ext)s"
-            ),
-
-            "format":
-                f"bv*[height<={mode}]+ba/"
-                f"b[height<={mode}]/best",
-
-            "merge_output_format": "mp4",
-
-            "quiet": True,
-
-            "no_warnings": True,
-
-            "noplaylist": True,
-
-            **cookie_options(),
-        }
-
-    with YoutubeDL(options) as y:
-
-        y.extract_info(
+        ydl.extract_info(
             url,
             download=True
         )
 
     files = [
-        p
-        for p in folder.iterdir()
 
-        if p.is_file()
+        f for f in folder.iterdir()
 
-        and p.suffix not in (
+        if f.is_file()
+
+        and f.suffix.lower()
+        not in (
             ".part",
             ".ytdl"
         )
@@ -311,372 +322,525 @@ def dl(url, folder, mode):
 
     return max(
         files,
-        key=lambda p: p.stat().st_size
+        key=lambda x:
+        x.stat().st_size
     )
+
+
+# =========================================================
+# DOWNLOAD MP3
+# =========================================================
+
+def download_mp3(
+    url,
+    folder
+):
+
+    opts = ydl_options()
+
+    opts.update({
+
+        "outtmpl":
+            str(
+                folder /
+                "audio.%(ext)s"
+            ),
+
+        "format":
+            "bestaudio/best",
+
+        "postprocessors": [
+
+            {
+                "key":
+                    "FFmpegExtractAudio",
+
+                "preferredcodec":
+                    "mp3",
+
+                "preferredquality":
+                    "192",
+            }
+        ],
+    })
+
+    with YoutubeDL(opts) as ydl:
+
+        ydl.extract_info(
+            url,
+            download=True
+        )
+
+    mp3_files = list(
+        folder.glob("*.mp3")
+    )
+
+    if not mp3_files:
+        return None
+
+    return mp3_files[0]
 
 
 # =========================================================
 # /START
 # =========================================================
 
-@r.message(CommandStart())
-async def start(m: Message):
+@router.message(
+    CommandStart()
+)
+async def start(
+    message: Message
+):
 
-    name = m.from_user.first_name or "Do'stim"
+    name = (
+        message.from_user.first_name
+        if message.from_user
+        else "Do‘stim"
+    )
 
-    await m.answer(
+    await message.answer(
 
         f"👋 <b>Assalomu alaykum, {name}!</b>\n\n"
 
         "🎬 <b>Media Yuklovchi Bot</b>\n\n"
 
-        "🔗 YouTube yoki Instagram havolasini yuboring.\n\n"
+        "🔗 YouTube yoki Instagram "
+        "havolasini yuboring.\n\n"
 
         "🔎 Qo‘shiq nomini yozsangiz "
         "YouTube'dan qidiraman.\n\n"
 
-        "📥 Video sifatlari:\n"
-
+        "📥 Video:\n"
         "• 360p\n"
         "• 480p\n"
         "• 720p\n"
         "• 1080p\n\n"
 
-        "🎵 Videoni MP3 qilib ham "
-        "yuklab olishingiz mumkin."
+        "🎵 MP3 ham mavjud."
     )
 
 
 # =========================================================
-# TEXT / LINK
+# TEXT HANDLER
 # =========================================================
 
-@r.message(F.text)
-async def text(m: Message):
+@router.message(
+    F.text
+)
+async def text_handler(
+    message: Message
+):
 
-    t = m.text.strip()
+    text = (
+        message.text or ""
+    ).strip()
 
-    u = URL.search(t)
+    match = URL_PATTERN.search(
+        text
+    )
 
     # =====================================================
-    # AGAR LINK EMAS BO'LSA -> YOUTUBE SEARCH
+    # TEXT = MUSIC SEARCH
     # =====================================================
 
-    if not u:
+    if not match:
 
-        s = await m.answer(
+        status = await message.answer(
             "🔎 <b>Qidirilmoqda...</b>"
         )
 
         try:
 
-            rs = await asyncio.to_thread(
-                search,
-                t
+            results = (
+                await asyncio.to_thread(
+                    search_youtube,
+                    text
+                )
             )
 
-            if not rs:
+            if not results:
 
-                return await s.edit_text(
-                    "❌ Hech narsa topilmadi."
+                return await status.edit_text(
+                    "😔 Hech narsa topilmadi."
                 )
 
             rows = []
 
-            for n, (title, url) in enumerate(
-                rs,
+            for number, item in enumerate(
+                results,
                 1
             ):
 
-                j = uuid.uuid4().hex[:10]
-
-                jobs[j] = url
-
-                rows.append(
-                    [
-                        InlineKeyboardButton(
-                            text=f"{n}. {title[:48]}",
-                            callback_data=f"p:{j}"
-                        )
-                    ]
+                job_id = (
+                    uuid.uuid4().hex[:10]
                 )
 
-            return await s.edit_text(
+                jobs[job_id] = (
+                    item["url"]
+                )
 
-                "🎵 <b>Natijani tanlang:</b>",
+                rows.append([
 
-                reply_markup=InlineKeyboardMarkup(
+                    InlineKeyboardButton(
+
+                        text=
+                        f"{number}. "
+                        f"{item['title'][:45]}",
+
+                        callback_data=
+                        f"p:{job_id}"
+                    )
+                ])
+
+            await status.edit_text(
+
+                "🎵 <b>Qidiruv natijalari:</b>\n\n"
+                "Keraklisini tanlang:",
+
+                reply_markup=
+                InlineKeyboardMarkup(
                     inline_keyboard=rows
                 )
             )
 
         except Exception as e:
 
-            logging.exception(
-                "YouTube search xatosi"
+            logger.exception(
+                "Search error"
             )
 
-            return await s.edit_text(
+            await status.edit_text(
 
-                "❌ <b>Qidirishda xatolik:</b>\n\n"
+                "❌ <b>Qidiruvda xatolik:</b>\n\n"
 
                 f"<code>{str(e)[-500:]}</code>"
             )
+
+        return
+
 
     # =====================================================
     # LINK
     # =====================================================
 
-    url = u.group(0).rstrip(
-        ").,]}>"
+    url = (
+        match.group(0)
+        .rstrip(").,]}>")
     )
 
-    # Faqat YouTube / Instagram
+    allowed = (
+        "youtube.com",
+        "youtu.be",
+        "instagram.com"
+    )
+
     if not any(
-        x in url.lower()
-        for x in (
-            "youtube.com",
-            "youtu.be",
-            "instagram.com"
-        )
+        site in url.lower()
+        for site in allowed
     ):
 
-        return await m.answer(
+        return await message.answer(
+
             "❌ Hozircha faqat "
-            "YouTube va Instagram qo‘llab-quvvatlanadi."
+            "YouTube va Instagram."
         )
 
-    s = await m.answer(
+    status = await message.answer(
         "🔎 <b>Video tekshirilmoqda...</b>"
     )
 
     try:
 
-        title, dur = await asyncio.to_thread(
-            info,
+        data = await asyncio.to_thread(
+            get_info,
             url
         )
 
-        j = uuid.uuid4().hex[:10]
+        job_id = (
+            uuid.uuid4().hex[:10]
+        )
 
-        jobs[j] = url
+        jobs[job_id] = url
 
-        # Davomiylik
+        duration = (
+            data.get("duration")
+        )
+
         duration_text = ""
 
-        if dur:
+        if isinstance(
+            duration,
+            (int, float)
+        ):
 
-            minutes = int(dur // 60)
-
-            seconds = int(dur % 60)
-
-            duration_text = (
-                f"\n⏱ {minutes}:"
-                f"{seconds:02d}"
+            duration = int(
+                duration
             )
 
-        await s.edit_text(
+            duration_text = (
+                f"\n⏱ "
+                f"{duration // 60}:"
+                f"{duration % 60:02d}"
+            )
 
-            f"🎬 <b>{title[:180]}</b>"
+        await status.edit_text(
+
+            f"🎬 <b>"
+            f"{data['title'][:180]}"
+            f"</b>"
             f"{duration_text}\n\n"
 
-            "📥 <b>Kerakli sifatni tanlang:</b>",
+            "👇 <b>Sifatni tanlang:</b>",
 
-            reply_markup=keyboard(j)
+            reply_markup=
+            quality_keyboard(
+                job_id
+            )
         )
 
     except Exception as e:
 
-        logging.exception(
-            "Video info xatosi"
+        logger.exception(
+            "Info error"
         )
 
         error = str(e)
 
         if (
-            "Sign in to confirm" in error
-            or "not a bot" in error.lower()
+            "page needs to be reloaded"
+            in error.lower()
         ):
 
             msg = (
-                "❌ <b>YouTube autentifikatsiya xatosi.</b>\n\n"
-                "🍪 Serverdagi YouTube cookie "
-                "eskirgan yoki ishlamayapti."
+                "❌ <b>YouTube player xatosi.</b>\n\n"
+                "Server YouTube sahifasini "
+                "o‘qiy olmadi."
+            )
+
+        elif (
+            "sign in to confirm"
+            in error.lower()
+            or
+            "not a bot"
+            in error.lower()
+        ):
+
+            msg = (
+                "❌ <b>YouTube autentifikatsiya "
+                "xatosi.</b>\n\n"
+                "🍪 Cookie eskirgan bo‘lishi mumkin."
             )
 
         else:
 
             msg = (
-                "❌ <b>Videoni tekshirib bo‘lmadi.</b>\n\n"
+                "❌ <b>Video tekshirilmadi:</b>\n\n"
                 f"<code>{error[-500:]}</code>"
             )
 
-        await s.edit_text(msg)
+        await status.edit_text(
+            msg
+        )
 
 
 # =========================================================
-# SEARCH NATIJASINI TANLASH
+# SEARCH RESULT
 # =========================================================
 
-@r.callback_query(
+@router.callback_query(
     F.data.startswith("p:")
 )
-async def pick(c: CallbackQuery):
+async def pick_result(
+    callback: CallbackQuery
+):
 
-    j = c.data.split(":")[1]
+    job_id = (
+        callback.data.split(":")[1]
+    )
 
-    await c.answer()
+    await callback.answer()
 
-    if j not in jobs:
+    if job_id not in jobs:
 
-        return await c.message.edit_text(
+        return await callback.message.edit_text(
             "❌ So‘rov eskirgan."
         )
 
-    await c.message.edit_text(
+    await callback.message.edit_text(
 
         "🎬 <b>Formatni tanlang:</b>",
 
-        reply_markup=keyboard(j)
+        reply_markup=
+        quality_keyboard(
+            job_id
+        )
     )
 
 
 # =========================================================
-# DOWNLOAD CALLBACK
+# DOWNLOAD
 # =========================================================
 
-@r.callback_query(
+@router.callback_query(
     F.data.startswith("d:")
 )
-async def down(c: CallbackQuery):
+async def download_handler(
+    callback: CallbackQuery
+):
 
-    _, j, mode = c.data.split(":")
+    _, job_id, mode = (
+        callback.data.split(":")
+    )
 
-    url = jobs.get(j)
+    url = jobs.get(
+        job_id
+    )
 
-    uid = c.from_user.id
-
-    # -------------------------
-    # URL yo'q
-    # -------------------------
+    user_id = (
+        callback.from_user.id
+    )
 
     if not url:
 
-        return await c.answer(
+        return await callback.answer(
             "So‘rov eskirgan.",
             show_alert=True
         )
 
-    # -------------------------
-    # User boshqa download qilmoqda
-    # -------------------------
+    if user_id in busy:
 
-    if uid in busy:
+        return await callback.answer(
 
-        return await c.answer(
-            "⏳ Oldingi yuklash tugashini kuting.",
+            "⏳ Oldingi yuklash "
+            "tugashini kuting.",
+
             show_alert=True
         )
 
-    busy.add(uid)
+    busy.add(
+        user_id
+    )
 
-    await c.answer()
+    await callback.answer()
 
-    folder = D / f"{uid}_{j}"
+    folder = (
+        DOWNLOAD_DIR /
+        f"{user_id}_{job_id}"
+    )
 
     folder.mkdir(
+        parents=True,
         exist_ok=True
     )
 
-    await c.message.edit_text(
+    await callback.message.edit_text(
 
         "⏳ <b>Yuklanmoqda...</b>\n\n"
-
-        "Video katta bo‘lsa biroz kuting."
+        "Iltimos kuting."
     )
 
     try:
 
         # =================================================
-        # YT-DLP DOWNLOAD
+        # DOWNLOAD
         # =================================================
 
-        p = await asyncio.to_thread(
-            dl,
-            url,
-            folder,
-            mode
-        )
+        if mode == "mp3":
 
-        if not p:
+            file_path = (
+                await asyncio.to_thread(
+                    download_mp3,
+                    url,
+                    folder
+                )
+            )
 
-            return await c.message.edit_text(
+        else:
+
+            file_path = (
+                await asyncio.to_thread(
+                    download_video,
+                    url,
+                    folder,
+                    int(mode)
+                )
+            )
+
+        if (
+            not file_path
+            or
+            not file_path.exists()
+        ):
+
+            return await callback.message.edit_text(
+
                 "❌ Fayl yaratilmadi.",
-                reply_markup=keyboard(j)
+
+                reply_markup=
+                quality_keyboard(
+                    job_id
+                )
             )
 
         # =================================================
-        # FILE SIZE
+        # SIZE
         # =================================================
 
-        mb = (
-            p.stat().st_size
-            / 1048576
+        size_mb = (
+            file_path.stat().st_size
+            / 1024
+            / 1024
         )
 
-        # =================================================
-        # TELEGRAM LIMIT
-        # =================================================
+        if size_mb > MAX_MB:
 
-        if mb > MAX_MB:
+            return await callback.message.edit_text(
 
-            return await c.message.edit_text(
+                "⚠️ <b>Fayl juda katta.</b>\n\n"
 
-                f"⚠️ <b>Fayl juda katta.</b>\n\n"
-
-                f"📦 Hajmi: {mb:.1f} MB\n"
+                f"📦 {size_mb:.1f} MB\n"
                 f"📏 Limit: {MAX_MB} MB\n\n"
 
                 "👇 Pastroq sifatni tanlang.",
 
-                reply_markup=keyboard(j)
+                reply_markup=
+                quality_keyboard(
+                    job_id
+                )
             )
 
         # =================================================
-        # UPLOAD
+        # TELEGRAM UPLOAD
         # =================================================
 
-        await c.message.edit_text(
+        await callback.message.edit_text(
 
-            "📤 <b>Telegramga yuborilmoqda...</b>\n\n"
+            "📤 <b>Telegramga "
+            "yuborilmoqda...</b>\n\n"
 
-            f"📦 {mb:.1f} MB"
+            f"📦 {size_mb:.1f} MB"
         )
-
-        # -------------------------
-        # MP3
-        # -------------------------
 
         if mode == "mp3":
 
-            await c.message.answer_audio(
+            await callback.message.answer_audio(
 
-                FSInputFile(p),
+                FSInputFile(
+                    file_path
+                ),
 
                 request_timeout=900
             )
-
-        # -------------------------
-        # VIDEO
-        # -------------------------
 
         else:
 
             try:
 
-                await c.message.answer_video(
+                await callback.message.answer_video(
 
-                    FSInputFile(p),
+                    FSInputFile(
+                        file_path
+                    ),
 
                     supports_streaming=True,
 
@@ -685,81 +849,95 @@ async def down(c: CallbackQuery):
 
             except Exception:
 
-                logging.exception(
-                    "Video sifatida yuborilmadi. "
-                    "Document sifatida yuborilmoqda."
+                logger.exception(
+                    "answer_video failed"
                 )
 
-                await c.message.answer_document(
+                await callback.message.answer_document(
 
-                    FSInputFile(p),
+                    FSInputFile(
+                        file_path
+                    ),
 
                     request_timeout=900
                 )
 
-        await c.message.edit_text(
+        await callback.message.edit_text(
             "✅ <b>Tayyor!</b>"
         )
 
-    # =====================================================
-    # ERROR
-    # =====================================================
-
     except Exception as e:
 
-        logging.exception(
-            "Download xatosi"
+        logger.exception(
+            "Download error"
         )
 
         error = str(e)
 
-        # YouTube cookie xatosi
         if (
-            "Sign in to confirm" in error
-            or "not a bot" in error.lower()
+            "page needs to be reloaded"
+            in error.lower()
         ):
 
             msg = (
-                "❌ <b>YouTube yuklashni blokladi.</b>\n\n"
-                "🍪 YouTube cookie eskirgan yoki "
-                "server uni qabul qilmayapti."
+                "❌ <b>YouTube player xatosi.</b>\n\n"
+                "YouTube ushbu server so‘rovini "
+                "qabul qilmadi."
             )
 
-        # Telegram timeout
-        elif "timeout" in error.lower():
+        elif (
+            "sign in to confirm"
+            in error.lower()
+            or
+            "not a bot"
+            in error.lower()
+        ):
+
+            msg = (
+                "❌ <b>YouTube autentifikatsiya "
+                "xatosi.</b>\n\n"
+                "🍪 Cookie yangilash talab "
+                "qilinishi mumkin."
+            )
+
+        elif (
+            "timeout"
+            in error.lower()
+        ):
 
             msg = (
                 "❌ <b>Telegram upload timeout.</b>\n\n"
-                "👇 Pastroq sifatni tanlab ko‘ring."
+                "👇 Pastroq sifatni tanlang."
             )
 
         else:
 
             msg = (
-                "❌ <b>Yuklashda xatolik:</b>\n\n"
+                "❌ <b>Xatolik:</b>\n\n"
                 f"<code>{error[-500:]}</code>"
             )
 
         try:
 
-            await c.message.edit_text(
+            await callback.message.edit_text(
 
                 msg,
 
-                reply_markup=keyboard(j)
+                reply_markup=
+                quality_keyboard(
+                    job_id
+                )
             )
 
         except Exception:
 
             pass
 
-    # =====================================================
-    # CLEANUP
-    # =====================================================
-
     finally:
 
-        busy.discard(uid)
+        busy.discard(
+            user_id
+        )
 
         shutil.rmtree(
             folder,
@@ -768,16 +946,15 @@ async def down(c: CallbackQuery):
 
 
 # =========================================================
-# BOT START
+# MAIN
 # =========================================================
 
 async def main():
 
-    if not TOKEN:
+    if not BOT_TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN topilmadi. "
-            "Railway Variables ichiga BOT_TOKEN kiriting."
+            "BOT_TOKEN Railway Variables ichida yo‘q."
         )
 
     session = AiohttpSession(
@@ -785,22 +962,35 @@ async def main():
     )
 
     bot = Bot(
-        TOKEN,
+
+        BOT_TOKEN,
+
         session=session,
-        default=DefaultBotProperties(
+
+        default=
+        DefaultBotProperties(
             parse_mode=ParseMode.HTML
         )
     )
 
     dp = Dispatcher()
 
-    dp.include_router(r)
+    dp.include_router(
+        router
+    )
 
-    print("🤖 MediaYuklaBot ishga tushdi.")
+    me = await bot.get_me()
+
+    logger.info(
+        "Bot ishga tushdi: @%s",
+        me.username
+    )
 
     try:
 
-        await dp.start_polling(bot)
+        await dp.start_polling(
+            bot
+        )
 
     finally:
 
@@ -809,4 +999,6 @@ async def main():
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    asyncio.run(
+        main()
+    )
